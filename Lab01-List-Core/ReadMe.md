@@ -1,4 +1,4 @@
-# ListItem_test
+# Discription
 
 This folder documents the first core module in my journey of rebuilding the FreeRTOS kernel from scratch: the `list` implementation.
 
