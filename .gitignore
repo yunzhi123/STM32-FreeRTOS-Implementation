@@ -1,0 +1,25 @@
+# build output
+build/
+Debug/
+Release/
+*.o
+*.elf
+*.bin
+*.hex
+*.map
+
+# IDE
+.vscode/
+.idea/
+*.uvguix.*
+*.uvoptx
+*.uvprojx.bak
+*.scvd
+
+# OS
+.DS_Store
+Thumbs.db
+
+# temporary
+*.log
+*.tmp
