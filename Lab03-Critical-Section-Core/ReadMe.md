@@ -1,188 +1,177 @@
-# Description
+# Lab03 - Critical Section Core
 
-This lab continues from `Lab01-List-Core`. After implementing the FreeRTOS-style doubly linked list, this lab uses that list infrastructure to build the first minimal task system.
+## Description
 
-The goal of this lab is to understand how a task is represented, how a task is created with static memory, how a task can be linked into a ready list, and how the architecture-specific port layer prepares the CPU context needed to start and switch tasks.
+This lab continues from `Lab02-Task-Core`. Lab02 introduced the basic task model, static task creation, task stacks, SVC startup, PendSV context switching, and cooperative switching through `taskYIELD()`.
 
-This is not a complete FreeRTOS scheduler yet. It is a minimal cooperative context-switching demo for learning the core mechanism behind task creation and task switching on ARM Cortex-M3.
+Lab03 adds the first critical section support. The goal is to understand how FreeRTOS protects kernel data structures from being interrupted while they are being modified.
 
-## What This Lab Adds After Lab01
+This lab does not yet apply critical sections throughout the scheduler. Instead, it focuses on building the core API and port-layer mechanism that later labs can use around ready lists, task state changes, and scheduler operations.
 
-Lab01 focused only on the generic list module:
+## What This Lab Adds After Lab02
 
-- `List_t`
-- `ListItem_t`
-- `MiniListItem_t`
-- list insertion and removal
-- list owner/container tracking
+Lab03 adds:
 
-Lab02 builds on top of that by adding:
+- Task-level critical section macros.
+- ISR-safe critical section macros.
+- BASEPRI-based interrupt masking for ARM Cortex-M3.
+- A critical nesting counter for task context.
+- Helper functions for raising and restoring the interrupt mask.
 
-- `TCB_t`, the task control block.
-- Static task creation through `xTaskCreateStatic()`.
-- Per-task stack buffers.
-- Per-task list items through `xStateListItem`.
-- Ready lists grouped by priority with `pxReadyTasksLists[]`.
-- Initial task stack frame construction in the port layer.
-- First task startup through SVC.
-- Manual task switching through PendSV.
-- Cooperative switching through `taskYIELD()`.
-
-## Main Components
-
-### TCB_t
-
-`TCB_t` represents one task. It stores the information needed by the scheduler and the CPU port layer:
+The important new user-facing APIs are:
 
 ```c
-typedef struct tskTackControlBlock {
-    volatile StackType_t *pxTopOfStack;
-    ListItem_t xStateListItem;
-    StackType_t *pxStack;
-    char pcTaskName[configMAX_TASK_NAME_LEN];
-} tskTCB;
+taskENTER_CRITICAL();
+taskEXIT_CRITICAL();
+
+taskENTER_CRITICAL_FROM_ISR();
+taskEXIT_CRITICAL_FROM_ISR( x );
 ```
 
-The most important fields are:
+## Main Idea
 
-- `pxTopOfStack`: The saved stack pointer of the task. Context switching depends on this field.
-- `xStateListItem`: The list item used to link the task into a ready list.
-- `pxStack`: The stack memory assigned to the task.
-- `pcTaskName`: The task name used for debugging.
+A critical section is a region of code that must not be interrupted by kernel-aware interrupts. In an RTOS, this is important when modifying shared kernel objects such as ready lists, task control blocks, or scheduler state.
 
-### Ready Lists
+On ARM Cortex-M, this lab uses the `BASEPRI` register instead of globally disabling all interrupts. `BASEPRI` masks interrupts at or below a configured priority level, while still allowing higher-priority interrupts to run.
 
-The ready lists are declared as:
+The interrupt mask level is configured in `FreeRTOSConfig.h`:
 
 ```c
-List_t pxReadyTasksLists[configMAX_PRIORITIES];
+#define configMAX_SYSCALL_INTERRUPT_PRIORITY 191
 ```
 
-This means each priority level owns one ready list. For example, if `configMAX_PRIORITIES` is 5, then the kernel has:
+When entering a critical section, the port layer writes this value into `BASEPRI`.
+
+## Task Context Flow
+
+Task-level critical sections start from the normal task API:
+
+```c
+taskENTER_CRITICAL();
+```
+
+The call flow is:
 
 ```text
-pxReadyTasksLists[0]
-pxReadyTasksLists[1]
-pxReadyTasksLists[2]
-pxReadyTasksLists[3]
-pxReadyTasksLists[4]
+taskENTER_CRITICAL()
+  -> portENTER_CRITICAL()
+  -> vPortEnterCritical()
+  -> portDISABLE_INTERRUPTS()
+  -> vPortRaiseBASEPRI()
+  -> write configMAX_SYSCALL_INTERRUPT_PRIORITY to BASEPRI
 ```
 
-In this lab, tasks are manually inserted into the ready lists from `User/main.c`.
-
-## Task Creation Flow
-
-Task creation starts from:
-
-```c
-xTaskCreateStatic(...)
-```
-
-Because this lab uses static allocation, the user provides both the task stack and the TCB memory:
-
-```c
-StackType_t Task1Stack[TASK1_STACK_SIZE];
-TCB_t Task1TCB;
-```
-
-The creation flow is:
-
-1. `xTaskCreateStatic()` checks whether the provided stack buffer and TCB buffer are valid.
-2. The provided TCB buffer is used as the new task's `TCB_t`.
-3. The provided stack buffer is assigned to `pxNewTCB->pxStack`.
-4. `prvInitialiseNewTask()` initializes the task metadata.
-5. The task name is copied into the TCB.
-6. The task's `xStateListItem` is initialized.
-7. The list item's owner is set to the task's TCB.
-8. `pxPortInitialiseStack()` builds the initial CPU stack frame.
-9. The returned stack pointer is stored in `pxNewTCB->pxTopOfStack`.
-10. The created task handle is returned to the caller.
-
-At this stage, initializing `xStateListItem` only prepares the task to be inserted into a list. The actual ready-list insertion is done separately with `vListInsertEnd()`.
-
-## Relationship Between task.c and port.c
-
-`task.c` owns the kernel-level task logic:
-
-- Creating a TCB.
-- Assigning stack memory.
-- Initializing task list items.
-- Starting the scheduler.
-- Selecting the next task in `vTaskSwitchContext()`.
-
-`port.c` owns the ARM Cortex-M3-specific CPU logic:
-
-- Building the initial stack frame for a task.
-- Starting the first task through SVC.
-- Saving the current task context in PendSV.
-- Restoring the next task context in PendSV.
-
-The boundary between these two layers is declared in `portable.h`:
-
-```c
-StackType_t *pxPortInitialiseStack(...);
-BaseType_t xPortStartScheduler(void);
-```
-
-This keeps the generic task logic separate from CPU-specific assembly code.
-
-## Context Switch Flow
-
-The current lab performs cooperative context switching:
+Leaving the critical section follows the reverse path:
 
 ```text
-Task1
-  -> taskYIELD()
-  -> portYIELD()
-  -> PendSV
-  -> save Task1 context
-  -> vTaskSwitchContext()
-  -> restore Task2 context
-  -> Task2
+taskEXIT_CRITICAL()
+  -> portEXIT_CRITICAL()
+  -> vPortExitCritical()
+  -> decrease uxCriticalNesting
+  -> if nesting becomes 0, clear BASEPRI
 ```
 
-The first task is started through SVC:
+The task-side implementation uses:
+
+```c
+static UBaseType_t uxCriticalNesting;
+```
+
+This counter allows nested critical sections. For example:
+
+```c
+taskENTER_CRITICAL();  /* nesting = 1 */
+taskENTER_CRITICAL();  /* nesting = 2 */
+
+taskEXIT_CRITICAL();   /* nesting = 1, interrupts still masked */
+taskEXIT_CRITICAL();   /* nesting = 0, interrupts can be unmasked */
+```
+
+This prevents an inner function from accidentally re-enabling interrupts while an outer critical section is still active.
+
+## ISR Context Flow
+
+Interrupt handlers use a different API:
+
+```c
+uint32_t ulSavedMask;
+
+ulSavedMask = taskENTER_CRITICAL_FROM_ISR();
+
+/* ISR critical section */
+
+taskEXIT_CRITICAL_FROM_ISR( ulSavedMask );
+```
+
+The enter flow is:
 
 ```text
-vTaskStartScheduler()
-  -> xPortStartScheduler()
-  -> prvStartFirstTask()
-  -> svc 0
-  -> vPortSVCHandler()
-  -> restore first task context
+taskENTER_CRITICAL_FROM_ISR()
+  -> portSET_INTERRUPT_MASK_FROM_ISR()
+  -> ulPortRaiseBASEPRI()
+  -> save current BASEPRI
+  -> write configMAX_SYSCALL_INTERRUPT_PRIORITY to BASEPRI
+  -> return the old BASEPRI value
 ```
 
-After the first task is running, later switches are handled by PendSV.
-
-## Test Scenario
-
-`User/main.c` creates two tasks:
-
-- `Task1_Entry()`: toggles `flag1`
-- `Task2_Entry()`: toggles `flag2`
-
-Both tasks call `taskYIELD()` so the PendSV handler can switch between them.
-
-The expected behavior in Keil Logic Analyzer is that `flag1` and `flag2` toggle alternately, showing that the CPU context is being switched between the two task stacks.
-
-## Current Limitations
-
-This lab intentionally keeps the scheduler simple. It does not yet implement:
-
-- Automatic task insertion into ready lists.
-- Priority-based task selection from `pxReadyTasksLists[]`.
-- SysTick-based time slicing.
-- Blocking delay lists.
-- Idle task creation.
-- Full FreeRTOS-compatible scheduling behavior.
-
-The purpose of this lab is to understand the essential mechanism:
+The exit flow is:
 
 ```text
-TCB + stack frame + SVC startup + PendSV context switch
+taskEXIT_CRITICAL_FROM_ISR( oldValue )
+  -> portCLEAR_INTERRUPT_MASK_FROM_ISR( oldValue )
+  -> vPortSetBASEPRI( oldValue )
 ```
-### Logic Analyzer Demo
 
-The waveform shows `flag1` and `flag2` toggling in turn. This confirms that the two tasks are switching execution through `taskYIELD()` and the PendSV context switch handler.
+ISR critical sections restore the previous interrupt mask instead of using the task nesting counter. This is important because an ISR may interrupt a task that was already inside a critical section. The ISR must restore the exact interrupt mask state that existed before it changed `BASEPRI`.
 
-![Logic Analyzer Demo](image.png)
+## Task vs ISR Critical Sections
+
+Task context and ISR context use different designs:
+
+```text
+Task context:
+  Uses uxCriticalNesting.
+  Supports nested critical sections.
+  Clears BASEPRI only when the outermost critical section exits.
+
+ISR context:
+  Saves the old BASEPRI value.
+  Raises BASEPRI during the ISR critical section.
+  Restores the saved BASEPRI value when leaving.
+```
+
+In short, task code manages critical section depth, while ISR code preserves and restores the interrupt mask state it interrupted.
+
+## Important Port-Layer Functions
+
+The main implementation is split between `task.h`, `portmacro.h`, and `port.c`.
+
+`task.h` provides the user-facing macros:
+
+```c
+#define taskENTER_CRITICAL()           portENTER_CRITICAL()
+#define taskEXIT_CRITICAL()            portEXIT_CRITICAL()
+
+#define taskENTER_CRITICAL_FROM_ISR()  portSET_INTERRUPT_MASK_FROM_ISR()
+#define taskEXIT_CRITICAL_FROM_ISR(x)  portCLEAR_INTERRUPT_MASK_FROM_ISR(x)
+```
+
+`portmacro.h` maps those macros to Cortex-M-specific operations:
+
+```c
+#define portDISABLE_INTERRUPTS()       vPortRaiseBASEPRI()
+#define portENABLE_INTERRUPT()         vPortSetBASEPRI( 0 )
+
+#define portENTER_CRITICAL()           vPortEnterCritical()
+#define portEXIT_CRITICAL()            vPortExitCritical()
+
+#define portSET_INTERRUPT_MASK_FROM_ISR()      ulPortRaiseBASEPRI()
+#define portCLEAR_INTERRUPT_MASK_FROM_ISR(x)   vPortSetBASEPRI( x )
+```
+
+`port.c` implements the task-level nesting logic:
+
+```c
+void vPortEnterCritical( void );
+void vPortExitCritical( void );
+```
