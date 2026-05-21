@@ -1,0 +1,175 @@
+#include "FreeRTOS.h"
+#include "task.h"
+#include "ARMCM3.h"
+
+static UBaseType_t uxCriticalNesting = 0xaaaaaaaa;
+
+#define portINITIAL_XPSR (0x01000000)
+#define portSTART_ADDRESS_MASK ((StackType_t)0xfffffffeUL)
+
+
+/* 
+ * System handler priority register 3 (SCB_SHPR3) SCB_SHPR3：0xE000 ED20
+ * Bits 31:24 PRI_15[7:0]: Priority of system handler 15, SysTick exception 
+ * Bits 23:16 PRI_14[7:0]: Priority of system handler 14, PendSV 
+ */
+#define portNVIC_SYSPRI2_REG (*((volatile uint32_t*)0xe000ed20))
+
+#define portNVIC_PENDSV_PRI (((uint32_t) configKERNEL_INTERRUPT_PRIORITY)<<16UL);
+#define portNVIC_SYSTICK_PRI (((uint32_t) configKERNEL_INTERRUPT_PRIORITY ) << 24UL );
+
+// STK->CTRL, //STK->LORD
+#define portNVIC_SYSTICK_CTRL_REG			( * ( ( volatile uint32_t * ) 0xe000e010 ) )
+#define portNVIC_SYSTICK_LOAD_REG			( * ( ( volatile uint32_t * ) 0xe000e014 ) )
+
+#ifndef configSYSTICK_CLOCK_HZ
+	#define configSYSTICK_CLOCK_HZ configCPU_CLOCK_HZ
+	#define portNVIC_SYSTICK_CLK_BIT	( 1UL << 2UL )
+#else
+	#define portNVIC_SYSTICK_CLK_BIT	( 0 )
+#endif
+
+#define portNVIC_SYSTICK_INT_BIT			( 1UL << 1UL )
+#define portNVIC_SYSTICK_ENABLE_BIT			( 1UL << 0UL )
+
+void prvStartFirstTask( void );
+void vPortSVCHandler( void );
+void xPortPendSVHandler( void );
+void vPortSetupTimerInterrupt( void );
+
+
+static void prvTaskExitError() {
+	while (1);
+}
+
+StackType_t* pxPortInitialiseStack(StackType_t* pxTopOfStack, TaskFunction_t pxCode, void* pvParameters) {
+	pxTopOfStack--;
+	*pxTopOfStack = portINITIAL_XPSR;
+	pxTopOfStack--;
+	*pxTopOfStack = ((StackType_t)pxCode) & portSTART_ADDRESS_MASK;
+	pxTopOfStack--;
+	*pxTopOfStack = (StackType_t) prvTaskExitError;
+	pxTopOfStack -= 5; // R12 R3 R2 R1 default 0
+	*pxTopOfStack = (StackType_t) pvParameters;
+	pxTopOfStack -= 8;
+	return pxTopOfStack;
+}
+
+BaseType_t xPortStartScheduler() {
+	portNVIC_SYSPRI2_REG |= portNVIC_PENDSV_PRI;
+	portNVIC_SYSPRI2_REG |= portNVIC_SYSTICK_PRI;
+
+	vPortSetupTimerInterrupt();
+
+	prvStartFirstTask();
+
+	return 0;
+}
+
+__asm void prvStartFirstTask() {
+	PRESERVE8 /* ARM cortexM3 alignment*/
+
+	ldr r0, =0xE000ED08 /* SCB_VTOR(vector table offset register)*/
+	ldr r0, [r0] /* dereference VTOR, got the address of vector table*/
+	ldr r0, [r0] /* dereference vector table, got the first address (must be MSP)*/
+
+	msr msp, r0 /* initialise the main stack pointer*/
+
+	cpsie i /* enable IRQ*/
+	cpsie f
+	dsb
+	isb
+
+	svc 0 /* jump to vPortSVCHandler*/
+	nop
+	nop
+}
+
+__asm void vPortSVCHandler() { /* SVC = supervisor call */
+	extern pxCurrentTCB
+
+	PRESERVE8
+
+	ldr r3, =pxCurrentTCB
+	ldr r1, [r3]
+	ldr r0, [r1] /* r0 = TaskxTCB.pxTopOfStack */
+	ldmia r0!, {r4-r11}
+	msr psp, r0
+	isb
+	mov r0, #0
+	msr basepri, r0
+	orr r14, #0xd /* r14 = LR */
+
+	bx r14
+
+}
+
+__asm void xPortPendSVHandler() {
+	extern pxCurrentTCB
+	extern vTaskSwitchContext
+	PRESERVE8
+
+	mrs r0, psp
+	isb
+
+	ldr r3, =pxCurrentTCB
+	ldr r2, [r3]
+
+	stmdb r0!, {r4-r11}
+	str r0, [r2]
+
+	stmdb sp!, {r3, r14}
+
+	mov r0, #configMAX_SYSCALL_INTERRUPT_PRIORITY
+	msr basepri, r0
+	dsb
+	isb
+	bl vTaskSwitchContext
+	mov r0, #0
+	msr basepri, r0
+	ldmia sp!, {r3, r14}
+
+	ldr r1, [r3]
+	ldr r0, [r1]
+	ldmia r0!, {r4-r11}
+	msr psp, r0
+	isb
+	bx r14
+	
+	nop
+}
+
+void vPortEnterCritical() {
+	portDISABLE_INTERRUPTS();
+	uxCriticalNesting ++;
+
+	if (uxCriticalNesting == 1) {
+		//configASSERT( ( portNVIC_INT_CTRL_REG & portVECTACTIVE_MASK ) == 0 );
+	}
+}
+
+void vPortExitCritical() {
+	//configASSERT(uxCriticalNesting);
+	uxCriticalNesting --;
+	if (uxCriticalNesting == 0) {
+		portENABLE_INTERRUPT();
+	}
+}
+
+void vPortSetupTimerInterrupt( void )
+{
+    portNVIC_SYSTICK_LOAD_REG = ( configSYSTICK_CLOCK_HZ / configTICK_RATE_HZ ) - 1UL;
+    
+    portNVIC_SYSTICK_CTRL_REG = ( portNVIC_SYSTICK_CLK_BIT | 
+                                  portNVIC_SYSTICK_INT_BIT |
+                                  portNVIC_SYSTICK_ENABLE_BIT ); 
+}
+
+// systick ISR
+void xPortSysTickHandler() {
+	vPortRaiseBASEPRI();
+
+	xTaskIncrementTick();
+
+	vPortClearBASEPRIFromISR();
+} 
