@@ -127,3 +127,7 @@ vTaskDelay() + SysTick + PendSV + IdleTask
 ```
 
 This turns the previous manual task switch demo into a small time-based scheduler.
+
+## Demo
+
+![Lab04 Demo](image.png)
