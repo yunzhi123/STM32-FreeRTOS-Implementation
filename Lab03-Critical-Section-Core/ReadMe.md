@@ -1,24 +1,21 @@
-# Lab03 - Critical Section Core
 
 ## Description
 
-This lab continues from `Lab02-Task-Core`. Lab02 introduced the basic task model, static task creation, task stacks, SVC startup, PendSV context switching, and cooperative switching through `taskYIELD()`.
+This lab continues from `Lab02-Task-Core`. Lab02 already has static task creation, SVC startup, PendSV context switching, and cooperative switching through `taskYIELD()`.
 
-Lab03 adds the first critical section support. The goal is to understand how FreeRTOS protects kernel data structures from being interrupted while they are being modified.
+Lab03 adds the first critical section mechanism. The goal is to understand how FreeRTOS prevents kernel data structures from being interrupted while they are being modified.
 
-This lab does not yet apply critical sections throughout the scheduler. Instead, it focuses on building the core API and port-layer mechanism that later labs can use around ready lists, task state changes, and scheduler operations.
+This lab focuses on the core API and Cortex-M3 port-layer mechanism. It does not yet apply critical sections everywhere in the scheduler.
 
 ## What This Lab Adds After Lab02
 
-Lab03 adds:
-
 - Task-level critical section macros.
 - ISR-safe critical section macros.
-- BASEPRI-based interrupt masking for ARM Cortex-M3.
-- A critical nesting counter for task context.
-- Helper functions for raising and restoring the interrupt mask.
+- `BASEPRI` interrupt masking on ARM Cortex-M3.
+- A nesting counter for task critical sections.
+- Helper functions for raising, clearing, saving, and restoring the interrupt mask.
 
-The important new user-facing APIs are:
+The main APIs are:
 
 ```c
 taskENTER_CRITICAL();
@@ -30,148 +27,55 @@ taskEXIT_CRITICAL_FROM_ISR( x );
 
 ## Main Idea
 
-A critical section is a region of code that must not be interrupted by kernel-aware interrupts. In an RTOS, this is important when modifying shared kernel objects such as ready lists, task control blocks, or scheduler state.
+A critical section is a short region of code that should not be interrupted by kernel-aware interrupts. In a kernel, this is important when modifying shared objects such as ready lists, TCBs, or scheduler state.
 
-On ARM Cortex-M, this lab uses the `BASEPRI` register instead of globally disabling all interrupts. `BASEPRI` masks interrupts at or below a configured priority level, while still allowing higher-priority interrupts to run.
-
-The interrupt mask level is configured in `FreeRTOSConfig.h`:
+This lab uses `BASEPRI` instead of disabling every interrupt globally. `BASEPRI` masks interrupts at or below `configMAX_SYSCALL_INTERRUPT_PRIORITY`, while still allowing higher-priority interrupts to run.
 
 ```c
 #define configMAX_SYSCALL_INTERRUPT_PRIORITY 191
 ```
 
-When entering a critical section, the port layer writes this value into `BASEPRI`.
+## Key Flow
 
-## Task Context Flow
-
-Task-level critical sections start from the normal task API:
-
-```c
-taskENTER_CRITICAL();
-```
-
-The call flow is:
+Task critical section:
 
 ```text
 taskENTER_CRITICAL()
   -> portENTER_CRITICAL()
   -> vPortEnterCritical()
-  -> portDISABLE_INTERRUPTS()
   -> vPortRaiseBASEPRI()
-  -> write configMAX_SYSCALL_INTERRUPT_PRIORITY to BASEPRI
+  -> uxCriticalNesting++
 ```
-
-Leaving the critical section follows the reverse path:
 
 ```text
 taskEXIT_CRITICAL()
   -> portEXIT_CRITICAL()
   -> vPortExitCritical()
-  -> decrease uxCriticalNesting
-  -> if nesting becomes 0, clear BASEPRI
+  -> uxCriticalNesting--
+  -> if nesting is 0, clear BASEPRI
 ```
 
-The task-side implementation uses:
-
-```c
-static UBaseType_t uxCriticalNesting;
-```
-
-This counter allows nested critical sections. For example:
-
-```c
-taskENTER_CRITICAL();  /* nesting = 1 */
-taskENTER_CRITICAL();  /* nesting = 2 */
-
-taskEXIT_CRITICAL();   /* nesting = 1, interrupts still masked */
-taskEXIT_CRITICAL();   /* nesting = 0, interrupts can be unmasked */
-```
-
-This prevents an inner function from accidentally re-enabling interrupts while an outer critical section is still active.
-
-## ISR Context Flow
-
-Interrupt handlers use a different API:
-
-```c
-uint32_t ulSavedMask;
-
-ulSavedMask = taskENTER_CRITICAL_FROM_ISR();
-
-/* ISR critical section */
-
-taskEXIT_CRITICAL_FROM_ISR( ulSavedMask );
-```
-
-The enter flow is:
+ISR critical section:
 
 ```text
 taskENTER_CRITICAL_FROM_ISR()
-  -> portSET_INTERRUPT_MASK_FROM_ISR()
   -> ulPortRaiseBASEPRI()
-  -> save current BASEPRI
-  -> write configMAX_SYSCALL_INTERRUPT_PRIORITY to BASEPRI
-  -> return the old BASEPRI value
+  -> return old BASEPRI value
 ```
-
-The exit flow is:
 
 ```text
 taskEXIT_CRITICAL_FROM_ISR( oldValue )
-  -> portCLEAR_INTERRUPT_MASK_FROM_ISR( oldValue )
   -> vPortSetBASEPRI( oldValue )
 ```
 
-ISR critical sections restore the previous interrupt mask instead of using the task nesting counter. This is important because an ISR may interrupt a task that was already inside a critical section. The ISR must restore the exact interrupt mask state that existed before it changed `BASEPRI`.
+The difference is that task critical sections use `uxCriticalNesting`, while ISR critical sections save and restore the previous `BASEPRI` value directly.
 
-## Task vs ISR Critical Sections
+## Main Files
 
-Task context and ISR context use different designs:
+- `task.h`: exposes the critical section macros.
+- `portmacro.h`: maps the macros to Cortex-M3 port functions.
+- `port.c`: implements `vPortEnterCritical()` and `vPortExitCritical()`.
 
-```text
-Task context:
-  Uses uxCriticalNesting.
-  Supports nested critical sections.
-  Clears BASEPRI only when the outermost critical section exits.
+## Current Limitations
 
-ISR context:
-  Saves the old BASEPRI value.
-  Raises BASEPRI during the ISR critical section.
-  Restores the saved BASEPRI value when leaving.
-```
-
-In short, task code manages critical section depth, while ISR code preserves and restores the interrupt mask state it interrupted.
-
-## Important Port-Layer Functions
-
-The main implementation is split between `task.h`, `portmacro.h`, and `port.c`.
-
-`task.h` provides the user-facing macros:
-
-```c
-#define taskENTER_CRITICAL()           portENTER_CRITICAL()
-#define taskEXIT_CRITICAL()            portEXIT_CRITICAL()
-
-#define taskENTER_CRITICAL_FROM_ISR()  portSET_INTERRUPT_MASK_FROM_ISR()
-#define taskEXIT_CRITICAL_FROM_ISR(x)  portCLEAR_INTERRUPT_MASK_FROM_ISR(x)
-```
-
-`portmacro.h` maps those macros to Cortex-M-specific operations:
-
-```c
-#define portDISABLE_INTERRUPTS()       vPortRaiseBASEPRI()
-#define portENABLE_INTERRUPT()         vPortSetBASEPRI( 0 )
-
-#define portENTER_CRITICAL()           vPortEnterCritical()
-#define portEXIT_CRITICAL()            vPortExitCritical()
-
-#define portSET_INTERRUPT_MASK_FROM_ISR()      ulPortRaiseBASEPRI()
-#define portCLEAR_INTERRUPT_MASK_FROM_ISR(x)   vPortSetBASEPRI( x )
-```
-
-`port.c` implements the task-level nesting logic:
-
-```c
-void vPortEnterCritical( void );
-void vPortExitCritical( void );
-```
+This lab only builds the critical section foundation. Later labs can use it around scheduler operations, ready-list changes, task state updates, and interrupt-driven kernel behavior.
