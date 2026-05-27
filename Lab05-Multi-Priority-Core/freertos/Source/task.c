@@ -15,16 +15,19 @@ static portTASK_FUNCTION( prvIdleTask, pvParameters );
 static void prvInitialiseNewTask(TaskFunction_t pxTaskCode,
 									const char * const pcName,             
 									const uint32_t ulStackDepth,
-									void * const pvParameters,          
+									void * const pvParameters,
+									UBaseType_t uxpriority,
 									TaskHandle_t * const pxCreatedTask,     
 									TCB_t *pxNewTCB );
 
-
+static volatile UBaseType_t uxTopReadyPriority = tskIDLE_PRIORITY;
+									
+static void prvAddNewTaskToReadyList(TCB_t* pxNewTCB);
 
 // macro define
 
 // general method to find maximum priority task
-#if (configUSE_PORT_OPTIMIZED_TASK_SELECTION == 0) 
+#if (configUSE_PORT_OPTIMISED_TASK_SELECTION == 0) 
 	#define taskRECORD_READY_PRIORITY(uxPriority) {\
 		if ((uxPriority) > uxTopReadyPriority) {\
 			uxTopReadyPriority = (uxPriority);\
@@ -39,25 +42,32 @@ static void prvInitialiseNewTask(TaskFunction_t pxTaskCode,
 		listGET_OWNER_OF_NEXT_ENTRY( pxCurrentTCB, &( pxReadyTasksLists[ uxTopPriority ] ) );\
 		uxTopReadyPriority = uxTopPriority;\
 	}
-
 	#define taskRESET_READY_PRIORITY( uxPriority )
-	#define portRESET_READY_PRIORITY( uxPriority, uxTopReadyPriority )
 
 #else 
-
-
+	#define taskRECORD_READY_PRIORITY(uxPriority) portRECORD_READY_PRIORITY(uxPriority, uxTopReadyPriority)
+	#define taskSELECT_HIGHEST_PRIORITY_TASK() {\
+		UBaseType_t uxTopPriority;\
+		portGET_HIGHEST_PRIORITY(uxTopPriority, uxTopReadyPriority);\
+		listGET_OWNER_OF_NEXT_ENTRY(pxCurrentTCB, &(pxReadyTasksLists[uxTopPriority]));\
+	}
+	#define taskRESET_READY_PRIORITY( uxPriority ) portRESET_READY_PRIORITY(uxPriority, uxTopReadyPriority)
 #endif
 
+#define prvAddTaskToReadyList(pxTCB)\
+	taskRECORD_READY_PRIORITY((pxTCB)->uxPriority);\
+	vListInsertEnd(&(pxReadyTasksLists[(pxTCB)->uxPriority]), &((pxTCB)->xStateListItem));
 
 // static create task
 #if(configSUPPORT_STATIC_ALLOCATION == 1)
 															
 TaskHandle_t xTaskCreateStatic(TaskFunction_t pxTaskCode,
-																const char *const pcName,
-																const uint32_t ulStackDepth,
-																void* const pvParameters,
-																StackType_t* const puxStackBuffer,
-																TCB_t* const pxTaskBuffer) {
+								const char *const pcName,
+								const uint32_t ulStackDepth,
+								void* const pvParameters,
+								UBaseType_t uxPriority,
+								StackType_t* const puxStackBuffer,
+								TCB_t* const pxTaskBuffer) {
 	TCB_t* pxNewTCB;
 	TaskHandle_t xReturn;
 																	
@@ -66,11 +76,14 @@ TaskHandle_t xTaskCreateStatic(TaskFunction_t pxTaskCode,
 		pxNewTCB->pxStack = (StackType_t*)puxStackBuffer;
 		
 		prvInitialiseNewTask(pxTaskCode,
-												 pcName,
-												 ulStackDepth,
-												 pvParameters,
-												 &xReturn,
-												 pxNewTCB);
+							pcName,
+							ulStackDepth,
+							pvParameters,
+							uxPriority,
+							&xReturn,
+							pxNewTCB);
+
+		prvAddNewTaskToReadyList(pxNewTCB);
 	} else {
 		xReturn = NULL;
 	}
@@ -82,7 +95,8 @@ TaskHandle_t xTaskCreateStatic(TaskFunction_t pxTaskCode,
 static void prvInitialiseNewTask( 	TaskFunction_t pxTaskCode,
 									const char * const pcName,             
 									const uint32_t ulStackDepth,
-									void * const pvParameters,          
+									void * const pvParameters,   
+									UBaseType_t uxPriority,       
 									TaskHandle_t * const pxCreatedTask,     
 									TCB_t *pxNewTCB ) {
 	StackType_t* pxTopOfStack;
@@ -100,6 +114,10 @@ static void prvInitialiseNewTask( 	TaskFunction_t pxTaskCode,
 	
 	vListInitialiseItem(&(pxNewTCB->xStateListItem));
 	listSET_LIST_ITEM_OWNER(&(pxNewTCB->xStateListItem), pxNewTCB);
+	if (uxPriority >= (UBaseType_t)configMAX_PRIORITIES) {
+		uxPriority = (UBaseType_t)configMAX_PRIORITIES - 1U;
+	}
+	pxNewTCB->uxPriority = uxPriority;
 	pxNewTCB->pxTopOfStack = pxPortInitialiseStack( pxTopOfStack, pxTaskCode, pvParameters );   
 	
 	if ((void*)pxCreatedTask != NULL) {
@@ -134,13 +152,13 @@ void vTaskStartScheduler() {
 					  (char*)"IDLE",
 					  (uint32_t)ulIdleTaskStackSize,
 					  (void*)NULL,
+					  (UBaseType_t) tskIDLE_PRIORITY,
 					  (StackType_t*)pxIdleTaskStackBuffer,
 					  (TCB_t*)pxIdleTaskTCBBuffer);
 	(void)xIdleTaskHandle;
 	
-	vListInsertEnd(&(pxReadyTasksLists[0]), &(((TCB_t*)pxIdleTaskTCBBuffer)->xStateListItem));
 
-	pxCurrentTCB = &Task1TCB;
+	taskSELECT_HIGHEST_PRIORITY_TASK();
 
 	if (xPortStartScheduler() != pdFALSE) {
 
@@ -155,23 +173,7 @@ static portTASK_FUNCTION( prvIdleTask, pvParameters )
 }
 
 void vTaskSwitchContext() {
-	if (pxCurrentTCB == &IdleTaskTCB) {
-		if (Task1TCB.xTicksToDelay == 0) pxCurrentTCB = &Task1TCB;
-		else if (Task2TCB.xTicksToDelay == 0) pxCurrentTCB = &Task2TCB;
-		else return;
-	}
-	
-	if (pxCurrentTCB == &Task1TCB) {
-		if (Task2TCB.xTicksToDelay == 0) pxCurrentTCB = &Task2TCB;
-		else if (pxCurrentTCB->xTicksToDelay != 0) pxCurrentTCB = &IdleTaskTCB;
-		else return;
-	}
-
-	if (pxCurrentTCB == &Task2TCB) {
-		if (Task1TCB.xTicksToDelay == 0) pxCurrentTCB = &Task1TCB;
-		else if (pxCurrentTCB->xTicksToDelay != 0) pxCurrentTCB = &IdleTaskTCB;
-		else return;
-	}
+	taskSELECT_HIGHEST_PRIORITY_TASK();
 }
 
 void vTaskDelay(const TickType_t xTicksToDelay) {
@@ -179,6 +181,7 @@ void vTaskDelay(const TickType_t xTicksToDelay) {
 	pxTCB = pxCurrentTCB;
 
 	pxTCB->xTicksToDelay = xTicksToDelay;
+	taskRESET_READY_PRIORITY(pxTCB->uxPriority);
 	taskYIELD();
 }
 
@@ -187,7 +190,25 @@ void xTaskIncrementTick(void) {
 	BaseType_t i = 0;
 	for (i=0; i<configMAX_PRIORITIES; i++) {
 		pxTCB = (TCB_t*)listGET_OWNER_OF_HEAD_ENTRY(&pxReadyTasksLists[i]);
-		if (pxTCB->xTicksToDelay > 0) pxTCB->xTicksToDelay --;
+		if (pxTCB->xTicksToDelay > 0) {
+			pxTCB->xTicksToDelay --;
+			if (pxTCB->xTicksToDelay == 0) taskRECORD_READY_PRIORITY(pxTCB->uxPriority);
+		}
 	}
 	portYIELD();
+}
+
+static void prvAddNewTaskToReadyList(TCB_t* pxNewTCB) {
+	taskENTER_CRITICAL();
+
+	uxCurrentNumberOfTasks ++;
+	if (pxCurrentTCB == NULL) {
+		pxCurrentTCB = pxNewTCB;
+		if (uxCurrentNumberOfTasks == 1) prvInitialiseTaskLists();
+	}  else {
+		if (pxCurrentTCB->uxPriority < pxNewTCB->uxPriority) pxCurrentTCB = pxNewTCB;
+	}
+	prvAddTaskToReadyList(pxNewTCB);
+
+	taskEXIT_CRITICAL();
 }

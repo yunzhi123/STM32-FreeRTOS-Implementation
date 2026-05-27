@@ -57,20 +57,20 @@ int main() {
 	prvInitialiseTaskLists();
 	
 	Task1_Handle = xTaskCreateStatic((TaskFunction_t)Task1_Entry,
-																	 (char*)"Task1",
-																		(uint32_t)TASK1_STACK_SIZE,
-																	  (void*) NULL,
-																		(StackType_t*)Task1Stack,
-																		(TCB_t*)&Task1TCB);
-	vListInsertEnd(&(pxReadyTasksLists[1]), &( ((TCB_t *)(&Task1TCB))->xStateListItem ));
+									(char*)"Task1",
+									(uint32_t)TASK1_STACK_SIZE,
+									(void*) NULL,
+									(UBaseType_t) 1U,
+									(StackType_t*)Task1Stack,
+									(TCB_t*)&Task1TCB);
 
 	Task2_Handle = xTaskCreateStatic( (TaskFunction_t)Task2_Entry, 
-													(char *)"Task2",              
-													(uint32_t)TASK2_STACK_SIZE ,  
-													(void *) NULL,              
-													(StackType_t *)Task2Stack,    
-													(TCB_t *)&Task2TCB );         
-	vListInsertEnd( &( pxReadyTasksLists[2] ), &( ((TCB_t *)(&Task2TCB))->xStateListItem ) );
+									(char *)"Task2",              
+									(uint32_t)TASK2_STACK_SIZE ,  
+									(void *) NULL,    
+									(UBaseType_t) 2U,          
+									(StackType_t *)Task2Stack,    
+									(TCB_t *)&Task2TCB );         
     
 	vTaskStartScheduler();
 	while (1);

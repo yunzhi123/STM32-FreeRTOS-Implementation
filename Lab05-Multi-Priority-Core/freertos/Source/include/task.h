@@ -14,6 +14,7 @@ TaskHandle_t xTaskCreateStatic(	TaskFunction_t pxTaskCode,
 					            const char * const pcName,
 					            const uint32_t ulStackDepth,
 					            void * const pvParameters,
+											UBaseType_t uxPriority,
 					            StackType_t * const puxStackBuffer,
 					            TCB_t * const pxTaskBuffer );
 #endif /* configSUPPORT_STATIC_ALLOCATION */
@@ -30,4 +31,6 @@ void xTaskIncrementTick(void);
 
 #define taskENTER_CRITICAL_FROM_ISR() portSET_INTERRUPT_MASK_FROM_ISR()
 #define taskEXIT_CRITICAL_FROM_ISR(x) portCLEAR_INTERRUPT_MASK_FROM_ISR(x)
+
+#define tskIDLE_PRIORITY ((UBaseType_t) 0U)
 #endif /* INC_TASK_H */ 

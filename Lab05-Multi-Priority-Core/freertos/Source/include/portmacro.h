@@ -90,4 +90,16 @@ static portFORCE_INLINE uint32_t ulPortRaiseBASEPRI(void) {
 	return ulReturn;
 }
 
+#ifndef configUSE_PORT_OPTIMISED_TASK_SELECTION
+	#define configUSE_PORT_OPTIMISED_TASK_SELECTION 1
+#endif
+
+#define portRECORD_READY_PRIORITY(uxPriority, uxReadyPriorities)\
+	(uxReadyPriorities) |= (1UL << uxPriority)
+
+#define portRESET_READY_PRIORITY(uxPriority, uxReadyPriorities)\
+	(uxReadyPriorities) &= ~(1UL << uxPriority);
+
+#define portGET_HIGHEST_PRIORITY(uxTopPriority, uxTopReadyPriorities)\
+	uxTopPriority = (31UL - (uint32_t)__clz((uxTopReadyPriorities)))
 #endif
